@@ -1,5 +1,5 @@
 # PlatinPay-Discord
-This is the Discord module of the PlatinPay project.
+This is the Discord bot of the PlatinPay project.
 
 ## Features
 - Modern, efficient design in Go.
