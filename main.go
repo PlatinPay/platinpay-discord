@@ -81,43 +81,11 @@ func main() {
 	router.POST("/addrole", addRoleHandler)
 	router.POST("/removerole", removeRoleHandler)
 	router.POST("/sendmessage", sendMessageHandler)
+	router.POST("/dmuser", dmUserHandler)
 
 	serverAddress := fmt.Sprintf(":%d", config.Config.Port)
 	log.Printf("Webhook server is running on port %d", config.Config.Port)
 	log.Fatal(router.Run(serverAddress))
-}
-
-func registerCmds() {
-	commands := []*discordgo.ApplicationCommand{
-		{
-			Name:        "shop",
-			Description: "Sends a shop link.",
-		},
-		{
-			Name:        "store",
-			Description: "Sends a shop link.",
-		},
-		{
-			Name:        "platinpay",
-			Description: "Sends a shop link.",
-		},
-	}
-
-	for _, cmd := range commands {
-		_, err := discord.ApplicationCommandCreate(discord.State.User.ID, config.Config.GuildID, cmd)
-		if err != nil {
-			log.Fatalf("Cannot create '%s' command: %v", cmd.Name, err)
-		}
-		fmt.Printf("'%s' command created\n", cmd.Name)
-	}
-}
-
-func cleanupGuildCommands() {
-	commands, _ := discord.ApplicationCommands(discord.State.User.ID, config.Config.GuildID)
-	for _, cmd := range commands {
-		_ = discord.ApplicationCommandDelete(discord.State.User.ID, config.Config.GuildID, cmd.ID)
-	}
-	fmt.Println("Guild commands cleaned up")
 }
 
 func addRoleHandler(c *gin.Context) {
@@ -157,4 +125,58 @@ func sendMessageHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Message sent successfully"})
+}
+
+func dmUserHandler(c *gin.Context) {
+	userID := c.PostForm("userID")
+	message := c.PostForm("message")
+
+	channel, err := discord.UserChannelCreate(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error creating DM channel: %v", err)})
+		fmt.Fprintf(os.Stderr, "Error sending message: %v\n", err)
+		return
+	}
+
+	_, err = discord.ChannelMessageSend(channel.ID, message)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error sending message: %v", err)})
+		fmt.Fprintf(os.Stderr, "Error sending message: %v\n", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Message sent successfully"})
+}
+
+func registerCmds() {
+	commands := []*discordgo.ApplicationCommand{
+		{
+			Name:        "shop",
+			Description: "Sends a shop link.",
+		},
+		{
+			Name:        "store",
+			Description: "Sends a shop link.",
+		},
+		{
+			Name:        "platinpay",
+			Description: "Sends a shop link.",
+		},
+	}
+
+	for _, cmd := range commands {
+		_, err := discord.ApplicationCommandCreate(discord.State.User.ID, config.Config.GuildID, cmd)
+		if err != nil {
+			log.Fatalf("Cannot create '%s' command: %v", cmd.Name, err)
+		}
+		fmt.Printf("'%s' command created\n", cmd.Name)
+	}
+}
+
+func cleanupGuildCommands() {
+	commands, _ := discord.ApplicationCommands(discord.State.User.ID, config.Config.GuildID)
+	for _, cmd := range commands {
+		_ = discord.ApplicationCommandDelete(discord.State.User.ID, config.Config.GuildID, cmd.ID)
+	}
+	fmt.Println("Guild commands cleaned up")
 }

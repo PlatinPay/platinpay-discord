@@ -2,9 +2,9 @@
 
 BASE_URL="http://localhost:8082"
 
-USER_ID="USER_ID_HERE"
-CHANNEL_ID="CHANNEL_ID_HERE"
-ROLE_ID="ROLE_ID_HERE"
+USER_ID="938762267049218128"
+CHANNEL_ID="1128989517785862164"
+ROLE_ID="1293551323429470310"
 
 counter=0
 
@@ -50,8 +50,37 @@ test_send_message() {
     fi
 }
 
+test_send_message() {
+    echo "[] Testing /sendmessage endpoint..."
+    response=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE_URL/sendmessage" \
+        -d "channelID=$CHANNEL_ID" \
+        -d "message=Test message, <@$USER_ID>")
+
+    if [ "$response" -eq 200 ]; then
+        echo "[✓] /sendmessage test passed."
+        ((counter+=1))
+    else
+        echo "[✗] /sendmessage test failed. HTTP status code: $response"
+    fi
+}
+
+test_dm_user() {
+    echo "[] Testing /dmuser endpoint..."
+    response=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE_URL/dmuser" \
+        -d "userID=$USER_ID" \
+        -d "message=Test message, <@$USER_ID>")
+
+    if [ "$response" -eq 200 ]; then
+        echo "[✓] /dmuser test passed."
+        ((counter+=1))
+    else
+        echo "[✗] /dmuser test failed. HTTP status code: $response"
+    fi
+}
+
 echo -e "Running tests on $BASE_URL with user ID $USER_ID...\n"
 test_add_role
 test_remove_role
 test_send_message
-echo -e "\nTests completed. $counter/3 tests passed."
+test_dm_user
+echo -e "\nTests completed. $counter/4 tests passed."
