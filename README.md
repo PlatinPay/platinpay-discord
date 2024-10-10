@@ -8,6 +8,7 @@ This is the Discord bot of the PlatinPay project.
     - Send messages
     - Add roles
     - Remove roles
+- An aliased /shop command to let players get a link to your shop
 
 ## Installation (Linux only ATM)
 1. Download the 'platinpay-discord' binary from the releases section of this repository.

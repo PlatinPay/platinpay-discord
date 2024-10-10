@@ -16,8 +16,9 @@ var discord *discordgo.Session
 
 type Config struct {
 	Config struct {
-		Port    int    `toml:"port"`
-		GuildID string `toml:"guildID"`
+		Port     int    `toml:"port"`
+		GuildID  string `toml:"guildID"`
+		ShopLink string `toml:"shopLink"`
 	} `toml:"config"`
 }
 
@@ -51,6 +52,28 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error opening connection: %v", err)
 	}
+
+	registerCmds()
+	discord.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		switch i.ApplicationCommandData().Name {
+		case "shop", "store", "platinpay":
+			embed := &discordgo.MessageEmbed{
+				Description: fmt.Sprintf("Here's the shop link: %s", config.Config.ShopLink),
+				Color:       0xFFFFFF,
+			}
+			err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Embeds: []*discordgo.MessageEmbed{embed},
+				},
+			})
+			if err != nil {
+				log.Printf("Error responding to /shop command: %v", err)
+			}
+		}
+	})
+
+	defer cleanupGuildCommands()
 	defer discord.Close()
 
 	router := gin.Default()
@@ -62,6 +85,39 @@ func main() {
 	serverAddress := fmt.Sprintf(":%d", config.Config.Port)
 	log.Printf("Webhook server is running on port %d", config.Config.Port)
 	log.Fatal(router.Run(serverAddress))
+}
+
+func registerCmds() {
+	commands := []*discordgo.ApplicationCommand{
+		{
+			Name:        "shop",
+			Description: "Sends a shop link.",
+		},
+		{
+			Name:        "store",
+			Description: "Sends a shop link.",
+		},
+		{
+			Name:        "platinpay",
+			Description: "Sends a shop link.",
+		},
+	}
+
+	for _, cmd := range commands {
+		_, err := discord.ApplicationCommandCreate(discord.State.User.ID, config.Config.GuildID, cmd)
+		if err != nil {
+			log.Fatalf("Cannot create '%s' command: %v", cmd.Name, err)
+		}
+		fmt.Printf("'%s' command created\n", cmd.Name)
+	}
+}
+
+func cleanupGuildCommands() {
+	commands, _ := discord.ApplicationCommands(discord.State.User.ID, config.Config.GuildID)
+	for _, cmd := range commands {
+		_ = discord.ApplicationCommandDelete(discord.State.User.ID, config.Config.GuildID, cmd.ID)
+	}
+	fmt.Println("Guild commands cleaned up")
 }
 
 func addRoleHandler(c *gin.Context) {
