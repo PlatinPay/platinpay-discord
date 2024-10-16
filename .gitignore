@@ -1,3 +1,6 @@
 .env
 
 platinpay-discord
+
+public_key.pem
+python-tests/venv/

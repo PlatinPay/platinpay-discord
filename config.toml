@@ -2,3 +2,7 @@
 port = 8082
 guildID = "1124628605843017738"
 shopLink = "https://shop.example.com"
+localOnly = false
+whitelistOnly = false
+whitelistedIPs = ["127.0.0.1"]
+useSigning = true

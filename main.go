@@ -1,10 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"math"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/bwmarrin/discordgo"
@@ -12,13 +20,20 @@ import (
 	"github.com/joho/godotenv"
 )
 
-var discord *discordgo.Session
+var (
+	discord      *discordgo.Session
+	tokenManager *TokenManager
+)
 
 type Config struct {
 	Config struct {
-		Port     int    `toml:"port"`
-		GuildID  string `toml:"guildID"`
-		ShopLink string `toml:"shopLink"`
+		Port           int      `toml:"port"`
+		GuildID        string   `toml:"guildID"`
+		ShopLink       string   `toml:"shopLink"`
+		LocalOnly      bool     `toml:"localOnly"`
+		WhitelistOnly  bool     `toml:"whitelistOnly"`
+		WhitelistedIPs []string `toml:"whitelistedIPs"`
+		UseSigning     bool     `toml:"useSigning"`
 	} `toml:"config"`
 }
 
@@ -41,6 +56,14 @@ func main() {
 
 	if _, err := toml.DecodeFile("config.toml", &config); err != nil {
 		log.Fatalf("Error loading config.toml file: %v", err)
+	}
+
+	if config.Config.UseSigning {
+		var err error
+		tokenManager, err = NewTokenManager("public_key.pem")
+		if err != nil {
+			log.Printf("Public key not found. Use /settoken to set the public key.")
+		}
 	}
 
 	discord, err = discordgo.New("Bot " + token)
@@ -70,6 +93,110 @@ func main() {
 			if err != nil {
 				log.Printf("Error responding to /shop command: %v", err)
 			}
+		case "settoken":
+			member := i.Member
+			if member == nil {
+				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseChannelMessageWithSource,
+					Data: &discordgo.InteractionResponseData{
+						Content: "Error: Member data not found.",
+						Flags:   discordgo.MessageFlagsEphemeral,
+					},
+				})
+				return
+			}
+
+			permissions, err := s.UserChannelPermissions(member.User.ID, i.ChannelID)
+			if err != nil {
+				log.Printf("Error getting user permissions: %v", err)
+				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseChannelMessageWithSource,
+					Data: &discordgo.InteractionResponseData{
+						Content: "Error retrieving your permissions.",
+						Flags:   discordgo.MessageFlagsEphemeral,
+					},
+				})
+				return
+			}
+
+			if permissions&discordgo.PermissionAdministrator == 0 {
+				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseChannelMessageWithSource,
+					Data: &discordgo.InteractionResponseData{
+						Content: "You do not have permission to use this command.",
+						Flags:   discordgo.MessageFlagsEphemeral,
+					},
+				})
+				return
+			}
+
+			options := i.ApplicationCommandData().Options
+			var token string
+			for _, opt := range options {
+				if opt.Name == "token" {
+					token = opt.StringValue()
+					break
+				}
+			}
+			if token == "" {
+				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseChannelMessageWithSource,
+					Data: &discordgo.InteractionResponseData{
+						Content: "Token is required.",
+						Flags:   discordgo.MessageFlagsEphemeral,
+					},
+				})
+				return
+			}
+
+			err = ioutil.WriteFile("public_key.pem", []byte(token), 0644)
+			if err != nil {
+				log.Printf("Error writing public key: %v", err)
+				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseChannelMessageWithSource,
+					Data: &discordgo.InteractionResponseData{
+						Content: fmt.Sprintf("Error saving token: %v", err),
+						Flags:   discordgo.MessageFlagsEphemeral,
+					},
+				})
+				return
+			}
+
+			if tokenManager != nil {
+				err = tokenManager.ReloadPublicKey()
+				if err != nil {
+					log.Printf("Error reloading public key: %v", err)
+					s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+						Type: discordgo.InteractionResponseChannelMessageWithSource,
+						Data: &discordgo.InteractionResponseData{
+							Content: fmt.Sprintf("Error reloading token: %v", err),
+							Flags:   discordgo.MessageFlagsEphemeral,
+						},
+					})
+					return
+				}
+			} else {
+				tokenManager, err = NewTokenManager("public_key.pem")
+				if err != nil {
+					log.Printf("Error initializing TokenManager: %v", err)
+					s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+						Type: discordgo.InteractionResponseChannelMessageWithSource,
+						Data: &discordgo.InteractionResponseData{
+							Content: fmt.Sprintf("Error initializing TokenManager: %v", err),
+							Flags:   discordgo.MessageFlagsEphemeral,
+						},
+					})
+					return
+				}
+			}
+
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "Token set successfully.",
+					Flags:   discordgo.MessageFlagsEphemeral,
+				},
+			})
 		}
 	})
 
@@ -77,6 +204,9 @@ func main() {
 	defer discord.Close()
 
 	router := gin.Default()
+
+	router.Use(IPAuthMiddleware())
+	router.Use(SignatureVerificationMiddleware())
 
 	router.POST("/addrole", addRoleHandler)
 	router.POST("/removerole", removeRoleHandler)
@@ -88,12 +218,98 @@ func main() {
 	log.Fatal(router.Run(serverAddress))
 }
 
-func addRoleHandler(c *gin.Context) {
-	userID := c.PostForm("userID")
-	roleID := c.PostForm("roleID")
+func IPAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		remoteIP := c.ClientIP()
+		allowed := false
 
-	err := discord.GuildMemberRoleAdd(config.Config.GuildID, userID, roleID)
+		if config.Config.LocalOnly {
+			if remoteIP == "127.0.0.1" || remoteIP == "::1" {
+				allowed = true
+			}
+		} else if config.Config.WhitelistOnly {
+			for _, ip := range config.Config.WhitelistedIPs {
+				if remoteIP == ip {
+					allowed = true
+					break
+				}
+			}
+		} else {
+			allowed = true
+		}
+
+		if !allowed {
+			log.Printf("Unauthorized request from IP: %s", remoteIP)
+			c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden"})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+
+func SignatureVerificationMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		log.Println("SignatureVerificationMiddleware called")
+
+		var signedReq struct {
+			Signature string `json:"signature"`
+			Data      string `json:"data"`
+		}
+
+		if err := c.ShouldBindJSON(&signedReq); err != nil {
+			log.Printf("Error parsing JSON: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+			c.Abort()
+			return
+		}
+
+		if config.Config.UseSigning {
+			isValid, err := verifySignature([]byte(signedReq.Data), signedReq.Signature)
+			if err != nil || !isValid {
+				log.Printf("Invalid signature: %v", err)
+				c.JSON(http.StatusForbidden, gin.H{"error": "Invalid signature"})
+				c.Abort()
+				return
+			}
+			log.Println("Signature verified and data set in context")
+		} else {
+			log.Println("UseSigning is disabled, skipping signature verification")
+		}
+
+		c.Set("data", signedReq.Data)
+		c.Next()
+	}
+}
+
+func addRoleHandler(c *gin.Context) {
+	dataRaw, exists := c.Get("data")
+	if !exists {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Data not found"})
+		return
+	}
+
+	dataString, ok := dataRaw.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid data type"})
+		return
+	}
+
+	var reqData struct {
+		Timestamp float64 `json:"timestamp"`
+		UserID    string  `json:"userID"`
+		RoleID    string  `json:"roleID"`
+	}
+
+	if err := json.Unmarshal([]byte(dataString), &reqData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid data format"})
+		return
+	}
+
+	err := discord.GuildMemberRoleAdd(config.Config.GuildID, reqData.UserID, reqData.RoleID)
 	if err != nil {
+		log.Printf("Error adding role: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error adding role: %v", err)})
 		return
 	}
@@ -102,11 +318,32 @@ func addRoleHandler(c *gin.Context) {
 }
 
 func removeRoleHandler(c *gin.Context) {
-	userID := c.PostForm("userID")
-	roleID := c.PostForm("roleID")
+	dataRaw, exists := c.Get("data")
+	if !exists {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Data not found"})
+		return
+	}
 
-	err := discord.GuildMemberRoleRemove(config.Config.GuildID, userID, roleID)
+	dataString, ok := dataRaw.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid data type"})
+		return
+	}
+
+	var reqData struct {
+		Timestamp float64 `json:"timestamp"`
+		UserID    string  `json:"userID"`
+		RoleID    string  `json:"roleID"`
+	}
+
+	if err := json.Unmarshal([]byte(dataString), &reqData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid data format"})
+		return
+	}
+
+	err := discord.GuildMemberRoleRemove(config.Config.GuildID, reqData.UserID, reqData.RoleID)
 	if err != nil {
+		log.Printf("Error removing role: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error removing role: %v", err)})
 		return
 	}
@@ -115,11 +352,32 @@ func removeRoleHandler(c *gin.Context) {
 }
 
 func sendMessageHandler(c *gin.Context) {
-	channelID := c.PostForm("channelID")
-	message := c.PostForm("message")
+	dataRaw, exists := c.Get("data")
+	if !exists {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Data not found"})
+		return
+	}
 
-	_, err := discord.ChannelMessageSend(channelID, message)
+	dataString, ok := dataRaw.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid data type"})
+		return
+	}
+
+	var reqData struct {
+		Timestamp float64 `json:"timestamp"`
+		ChannelID string  `json:"channelID"`
+		Message   string  `json:"message"`
+	}
+
+	if err := json.Unmarshal([]byte(dataString), &reqData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid data format"})
+		return
+	}
+
+	_, err := discord.ChannelMessageSend(reqData.ChannelID, reqData.Message)
 	if err != nil {
+		log.Printf("Error sending message: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error sending message: %v", err)})
 		return
 	}
@@ -128,20 +386,40 @@ func sendMessageHandler(c *gin.Context) {
 }
 
 func dmUserHandler(c *gin.Context) {
-	userID := c.PostForm("userID")
-	message := c.PostForm("message")
-
-	channel, err := discord.UserChannelCreate(userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error creating DM channel: %v", err)})
-		fmt.Fprintf(os.Stderr, "Error sending message: %v\n", err)
+	dataRaw, exists := c.Get("data")
+	if !exists {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Data not found"})
 		return
 	}
 
-	_, err = discord.ChannelMessageSend(channel.ID, message)
+	dataString, ok := dataRaw.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid data type"})
+		return
+	}
+
+	var reqData struct {
+		Timestamp float64 `json:"timestamp"`
+		UserID    string  `json:"userID"`
+		Message   string  `json:"message"`
+	}
+
+	if err := json.Unmarshal([]byte(dataString), &reqData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid data format"})
+		return
+	}
+
+	channel, err := discord.UserChannelCreate(reqData.UserID)
 	if err != nil {
+		log.Printf("Error creating DM channel: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error creating DM channel: %v", err)})
+		return
+	}
+
+	_, err = discord.ChannelMessageSend(channel.ID, reqData.Message)
+	if err != nil {
+		log.Printf("Error sending DM: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error sending message: %v", err)})
-		fmt.Fprintf(os.Stderr, "Error sending message: %v\n", err)
 		return
 	}
 
@@ -149,6 +427,7 @@ func dmUserHandler(c *gin.Context) {
 }
 
 func registerCmds() {
+	adminPermission := int64(discordgo.PermissionAdministrator)
 	commands := []*discordgo.ApplicationCommand{
 		{
 			Name:        "shop",
@@ -162,6 +441,19 @@ func registerCmds() {
 			Name:        "platinpay",
 			Description: "Sends a shop link.",
 		},
+		{
+			Name:        "settoken",
+			Description: "Set the public key/token for signature verification",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "token",
+					Description: "The public key/token",
+					Required:    true,
+				},
+			},
+			DefaultMemberPermissions: &adminPermission,
+		},
 	}
 
 	for _, cmd := range commands {
@@ -171,6 +463,98 @@ func registerCmds() {
 		}
 		fmt.Printf("'%s' command created\n", cmd.Name)
 	}
+}
+
+type TokenManager struct {
+	PublicKey     ed25519.PublicKey
+	PublicKeyPath string
+}
+
+func NewTokenManager(publicKeyPath string) (*TokenManager, error) {
+	tm := &TokenManager{PublicKeyPath: publicKeyPath}
+	err := tm.ReloadPublicKey()
+	if err != nil {
+		return nil, err
+	}
+	return tm, nil
+}
+
+func (tm *TokenManager) ReloadPublicKey() error {
+	data, err := ioutil.ReadFile(tm.PublicKeyPath)
+	if err != nil {
+		return err
+	}
+
+	data = bytes.TrimSpace(data)
+
+	derBytes, err := base64.StdEncoding.DecodeString(string(data))
+	if err != nil {
+		return fmt.Errorf("error decoding base64 public key: %v", err)
+	}
+
+	parsedKey, err := x509.ParsePKIXPublicKey(derBytes)
+	if err != nil {
+		return fmt.Errorf("error parsing DER public key: %v", err)
+	}
+
+	pubKey, ok := parsedKey.(ed25519.PublicKey)
+	if !ok {
+		return fmt.Errorf("public key is not of type ed25519")
+	}
+
+	tm.PublicKey = pubKey
+	return nil
+}
+
+func verifySignature(data []byte, signature string) (bool, error) {
+	if tokenManager == nil || tokenManager.PublicKey == nil {
+		log.Println("Public key not loaded")
+		return false, fmt.Errorf("public key not loaded")
+	}
+
+	signatureBytes, err := base64.StdEncoding.DecodeString(signature)
+	if err != nil {
+		log.Printf("Error decoding signature: %v", err)
+		return false, fmt.Errorf("error decoding signature: %v", err)
+	}
+
+	if len(signatureBytes) != ed25519.SignatureSize {
+		log.Println("Invalid signature size")
+		return false, fmt.Errorf("invalid signature size")
+	}
+
+	isValid := ed25519.Verify(tokenManager.PublicKey, data, signatureBytes)
+	if !isValid {
+		log.Println("Signature verification failed")
+		return false, nil
+	}
+
+	var dataMap map[string]interface{}
+	if err := json.Unmarshal(data, &dataMap); err != nil {
+		log.Printf("Error unmarshalling data for timestamp check: %v", err)
+		return false, fmt.Errorf("error unmarshalling data: %v", err)
+	}
+
+	timestampVal, ok := dataMap["timestamp"]
+	if !ok {
+		log.Println("Missing timestamp")
+		return false, fmt.Errorf("missing timestamp")
+	}
+
+	timestamp, ok := timestampVal.(float64)
+	if !ok {
+		log.Println("Invalid timestamp format")
+		return false, fmt.Errorf("invalid timestamp format")
+	}
+
+	currentTime := float64(time.Now().UnixMilli())
+	if math.Abs(currentTime-timestamp) > 5000 {
+		log.Println("Timestamp is too old or in the future")
+		return false, fmt.Errorf("timestamp is too old or in the future")
+	}
+
+	log.Println("Signature verification and timestamp validation succeeded")
+	return true, nil
 }
 
 func cleanupGuildCommands() {
