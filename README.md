@@ -1,4 +1,7 @@
 # PlatinPay-Discord
+
+[Find the main README here!](https://github.com/PlatinPay)
+
 This is the Discord bot of the PlatinPay project.
 
 ## Features
@@ -10,11 +13,15 @@ This is the Discord bot of the PlatinPay project.
     - Remove roles
     - DM players
 - An aliased /shop command to let players get a link to your shop
+- A variety of security features, such as the ability to only accept local inbound requests, and the ability to whitelist IPs making inbound requests.
+- Ed25519 asymmetric signing
 
 ## Installation (Linux only ATM)
 1. Download the 'platinpay-discord' binary from the releases section of this repository.
 2. Put it in a folder alongside with a config.toml, look at the file in this repository for an example
-3. Execute the binary: `./platinpay-discord`
+4. Write DISCORD_TOKEN="YOUR TOKEN" to .env
+5. Set your public key through the slash command
+6. Execute the binary: `./platinpay-discord`
 
 This project is licensed under the [GNU AGPL-3.0](LICENSE) License. See the `LICENSE` file for details.
 
